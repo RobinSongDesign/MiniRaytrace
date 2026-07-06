@@ -1,0 +1,3 @@
+/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/tinyobjloader-subbuild/CMakeFiles/tinyobjloader-populate.dir
+/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/tinyobjloader-subbuild/CMakeFiles/edit_cache.dir
+/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/tinyobjloader-subbuild/CMakeFiles/rebuild_cache.dir

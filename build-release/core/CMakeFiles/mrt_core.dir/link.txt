@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmrt_core.a CMakeFiles/mrt_core.dir/src/gpu/GpuContext.cpp.o CMakeFiles/mrt_core.dir/src/accel/Bvh.cpp.o CMakeFiles/mrt_core.dir/src/render/Renderer.cpp.o CMakeFiles/mrt_core.dir/src/post/Denoiser.cpp.o CMakeFiles/mrt_core.dir/src/scene/Scene.cpp.o CMakeFiles/mrt_core.dir/src/Engine.cpp.o
+/usr/bin/ranlib libmrt_core.a

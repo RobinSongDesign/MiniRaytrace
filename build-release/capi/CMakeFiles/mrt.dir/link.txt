@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -arch arm64 -dynamiclib -Wl,-headerpad_max_install_names -o libmrt.dylib -install_name @rpath/libmrt.dylib CMakeFiles/mrt.dir/src/capi.cpp.o  -Wl,-rpath,/Users/Robinsong/VulkanSDK/1.4.350.0/macOS/lib ../core/libmrt_core.a ../_deps/glm-build/glm/libglm.a /Users/Robinsong/VulkanSDK/1.4.350.0/macOS/lib/libvulkan.dylib

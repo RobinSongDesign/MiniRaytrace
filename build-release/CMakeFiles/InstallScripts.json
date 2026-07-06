@@ -1,0 +1,16 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/glm-build/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/glm-build/glm/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/vma-build/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/tinyobjloader-build/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/glfw-build/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/glfw-build/src/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/core/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/capi/cmake_install.cmake",
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/viewer/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/Robinsong/Dev/MiniRaytrace/build-release/_deps/imgui-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
