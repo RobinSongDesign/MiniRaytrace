@@ -3,7 +3,11 @@
 // Targets Vulkan 1.2 core; on macOS runs through MoltenVK and therefore
 // enables VK_KHR_portability_enumeration / VK_KHR_portability_subset.
 
-#include <vulkan/vulkan.h>
+// volk loads every Vulkan entry point at runtime (dlopen/LoadLibrary) instead
+// of the loader import library, so libmrt has zero load-time dependency on
+// Vulkan being present (PRD §8 A4). volk.h itself defines VK_NO_PROTOTYPES
+// and pulls in vulkan/vulkan.h.
+#include <volk.h>
 #include <vk_mem_alloc.h>
 
 #include "mrt/Common.hpp"
@@ -89,6 +93,9 @@ struct GpuContextDesc {
     bool enableValidation   = false;
     bool needPresentSupport = false;
     std::vector<const char*> instanceExtensions;
+    // -1 = auto (prefer discrete GPU, PRD §8 A4 default); >=0 = force this
+    // vkEnumeratePhysicalDevices index (Rhino's per-session GPU preference).
+    int32_t gpuIndex = -1;
 };
 
 class GpuContext {
@@ -127,7 +134,7 @@ public:
 
 private:
     Result createInstance(const GpuContextDesc& desc);
-    Result pickDeviceAndQueue(bool needPresent);
+    Result pickDeviceAndQueue(bool needPresent, int32_t gpuIndex);
     Result createDevice(bool needPresent);
 
     VkInstance       m_instance = VK_NULL_HANDLE;

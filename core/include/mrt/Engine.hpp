@@ -24,9 +24,19 @@ struct EngineDesc {
     bool needPresentSupport   = false;     // viewer sets true (adds swapchain device ext)
     const char* const* instanceExtensions = nullptr; // e.g. from glfwGetRequiredInstanceExtensions
     uint32_t instanceExtensionCount = 0;
+    // -1 = auto (prefer discrete GPU); >=0 = force this vkEnumeratePhysicalDevices
+    // index (PRD §8 A4 — Rhino's per-session GPU preference on hybrid-graphics
+    // laptops). Query available devices first via a throwaway headless engine
+    // or ship a "list devices" utility; there's no enumerate-without-creating
+    // entry point in v1.
+    int32_t gpuIndex = -1;
     RenderSettings settings;
 };
 
+// Layout for both formats (PRD §8 A7): row-major, top-down — row 0 is the
+// top of the image, matching Rhino's RenderWindow channel convention, so
+// integrations never need a vertical flip. Alpha is always 1.0 in v1 (no
+// partial pixel coverage / alpha matte yet).
 enum class ReadbackFormat : uint32_t {
     RGBA8_SRGB,    // tonemapped, display-ready (matches viewer output)
     RGBA32F_LINEAR // raw accumulated radiance (Rhino-managed color pipeline)
@@ -42,6 +52,12 @@ public:
     Result setRenderSettings(const RenderSettings& s);
     const RenderSettings& renderSettings() const { return m_settings; }
     void   resetAccumulation();
+
+    // Explicitly apply pending scene changes: BLAS/TLAS rebuilds, buffer
+    // uploads, accumulation reset. Idempotent — a second call with no new
+    // dirty state is a cheap no-op (PRD §8 A1). renderFrame() also calls this
+    // internally, so callers that don't need commit stats may skip it.
+    Result commitScene(CommitStats* outStats = nullptr);
 
     // Sync dirty scene state, trace one frame, resolve. Blocking (PRD §8).
     Result renderFrame(FrameInfo& outInfo);

@@ -22,6 +22,7 @@ Result Engine::init(const EngineDesc& desc) {
     GpuContextDesc gd;
     gd.enableValidation = desc.enableValidation;
     gd.needPresentSupport = desc.needPresentSupport;
+    gd.gpuIndex = desc.gpuIndex;
     for (uint32_t i = 0; i < desc.instanceExtensionCount; ++i)
         gd.instanceExtensions.push_back(desc.instanceExtensions[i]);
 
@@ -40,14 +41,21 @@ Result Engine::setRenderSettings(const RenderSettings& s) {
 
 void Engine::resetAccumulation() { m_renderer->resetAccumulation(); }
 
-Result Engine::renderFrame(FrameInfo& outInfo) {
+Result Engine::commitScene(CommitStats* outStats) {
     // Camera / env-param changes need no GPU repack, just an accumulation
     // restart (both are read from fresh globals every frame).
     const uint32_t lightweight = DirtyCamera | DirtyEnvParams;
     if (m_scene.dirty() != DirtyNone && (m_scene.dirty() & ~lightweight) == 0) {
         m_scene.clearDirty();
         m_renderer->resetAccumulation();
+        if (outStats) *outStats = CommitStats{};
+        return Result::Success;
     }
+    return m_renderer->syncScene(m_scene, outStats);
+}
+
+Result Engine::renderFrame(FrameInfo& outInfo) {
+    if (Result r = commitScene(nullptr); r != Result::Success) return r;
     return m_renderer->renderFrame(m_scene, outInfo);
 }
 

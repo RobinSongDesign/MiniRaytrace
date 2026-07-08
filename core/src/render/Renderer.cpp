@@ -79,11 +79,14 @@ Result Renderer::init(const RenderSettings& settings) {
 
     // Minimal valid placeholders so every descriptor can be written before
     // the first scene commit.
-    auto ensureMin = [&](Buffer& b) { b.create(m_gpu, 16, kSceneBufUsage, false); };
-    ensureMin(m_nodesBuf); ensureMin(m_trianglesBuf); ensureMin(m_positionsBuf);
-    ensureMin(m_normalsBuf); ensureMin(m_uvsBuf); ensureMin(m_tangentsBuf);
-    ensureMin(m_instancesBuf); ensureMin(m_materialsBuf); ensureMin(m_lightsBuf);
-    ensureMin(m_envCdfBuf);
+    auto ensureMin = [&](Buffer& b, VkDeviceSize bytes) { b.create(m_gpu, bytes, kSceneBufUsage, false); };
+    // m_nodesBuf must fit the sentinel BvhNode written into it just below;
+    // a flat 16-byte placeholder here was a real (if rare) OOB vkCmdCopyBuffer
+    // (32 bytes into a 16-byte buffer) that could corrupt GPU allocator state.
+    ensureMin(m_nodesBuf, sizeof(BvhNode)); ensureMin(m_trianglesBuf, 16); ensureMin(m_positionsBuf, 16);
+    ensureMin(m_normalsBuf, 16); ensureMin(m_uvsBuf, 16); ensureMin(m_tangentsBuf, 16);
+    ensureMin(m_instancesBuf, 16); ensureMin(m_materialsBuf, 16); ensureMin(m_lightsBuf, 16);
+    ensureMin(m_envCdfBuf, 16);
 
     m_globalsBuf.create(m_gpu, sizeof(GpuGlobals),
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, /*hostVisible*/ true);
@@ -158,9 +161,20 @@ void Renderer::createPipelines() {
     lci.pBindings = bindings.data();
     MRT_VK_CHECK(vkCreateDescriptorSetLayout(dev, &lci, nullptr, &m_setLayout));
 
+    // Tile row offset for pathtrace (PRD §8 A6): a push constant rather than
+    // vkCmdDispatchBase, which produced wrong output for non-zero bases in
+    // practice despite being used per spec (VK_PIPELINE_CREATE_DISPATCH_BASE_BIT
+    // set, no validation errors) — not reliable enough to depend on. Every
+    // pipeline sharing this layout must declare a compatible push constant
+    // range even if unused, so resolve (which is always dispatched whole,
+    // never tiled) gets the same range.
+    VkPushConstantRange pushConstant{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
+
     VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &m_setLayout;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pushConstant;
     MRT_VK_CHECK(vkCreatePipelineLayout(dev, &pli, nullptr, &m_pipeLayout));
 
     m_pathtracePipe = createComputePipeline(g_pathtrace_spv, g_pathtrace_spv_count, "pathtrace");
@@ -273,22 +287,35 @@ void Renderer::updateDescriptors() {
 }
 
 // ---------------------------------------------------------- scene packing --
-Result Renderer::syncScene(Scene& scene) {
+Result Renderer::syncScene(Scene& scene, CommitStats* outStats) {
+    const auto t0 = std::chrono::high_resolution_clock::now();
     const uint32_t dirty = scene.dirty();
-    if (dirty == DirtyNone) return Result::Success;
+    if (dirty == DirtyNone) {
+        if (outStats) *outStats = CommitStats{};
+        return Result::Success;
+    }
 
     vkDeviceWaitIdle(m_gpu.device()); // v1: one frame in flight, safe to repack
 
+    uint32_t blasRebuilt = 0;
     if (dirty & DirtyTextures)  uploadTextures(scene);
     if (dirty & DirtyMaterials) packMaterials(scene);
-    if (dirty & DirtyGeometry)  packGeometry(scene);
-    if (dirty & (DirtyGeometry | DirtyInstances | DirtyMaterials)) packInstances(scene);
+    if (dirty & DirtyGeometry)  blasRebuilt = packGeometry(scene);
+    const bool tlasRebuilt = (dirty & (DirtyGeometry | DirtyInstances | DirtyMaterials)) != 0;
+    if (tlasRebuilt)            packInstances(scene);
     if (dirty & DirtyLights)    packLights(scene);
     if (dirty & DirtyEnv)       packEnvironment(scene);
 
     if (m_descriptorsDirty) updateDescriptors();
     scene.clearDirty();
     resetAccumulation();
+
+    if (outStats) {
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        outStats->blasRebuilt = blasRebuilt;
+        outStats->tlasRebuilt = tlasRebuilt;
+        outStats->commitMs = std::chrono::duration<float, std::milli>(t1 - t0).count();
+    }
     return Result::Success;
 }
 
@@ -303,7 +330,7 @@ bool ensureBuffer(GpuContext& gpu, Buffer& b, VkDeviceSize size) {
 }
 } // namespace
 
-void Renderer::packGeometry(Scene& scene) {
+uint32_t Renderer::packGeometry(Scene& scene) {
     // Sorted iteration keeps packing deterministic across commits.
     std::map<MeshId, MeshData*> sorted;
     for (auto& [id, mesh] : scene.meshes()) sorted[id] = &mesh;
@@ -414,6 +441,8 @@ void Renderer::packGeometry(Scene& scene) {
     if (!normals.empty())   m_gpu.uploadToBuffer(m_normalsBuf, normals.data(), normals.size() * sizeof(vec4));
     if (!uvs.empty())       m_gpu.uploadToBuffer(m_uvsBuf, uvs.data(), uvs.size() * sizeof(vec2));
     if (!tangents.empty())  m_gpu.uploadToBuffer(m_tangentsBuf, tangents.data(), tangents.size() * sizeof(vec4));
+
+    return static_cast<uint32_t>(jobs.size());
 }
 
 void Renderer::packInstances(Scene& scene) {
@@ -634,8 +663,25 @@ void Renderer::packEnvironment(Scene& scene) {
 
 void Renderer::uploadTextures(Scene& scene) {
     const auto& textures = scene.textures();
-    for (size_t slot = m_textures.size(); slot < textures.size() && slot < kMaxTextures; ++slot) {
+    const size_t slotCount = std::min(textures.size(), size_t(kMaxTextures));
+
+    if (m_textures.size() < slotCount) {
+        m_textures.resize(slotCount);
+        m_textureGenerations.resize(slotCount, 0);
+    }
+
+    for (size_t slot = 0; slot < slotCount; ++slot) {
         const TextureData& t = textures[slot];
+        if (m_textureGenerations[slot] == t.generation) continue; // unchanged since last upload
+
+        if (t.data.empty()) {
+            // Removed: revert the slot to the dummy texture (PRD §8 A3).
+            m_textures[slot] = Image{};
+            m_textureGenerations[slot] = t.generation;
+            m_descriptorsDirty = true;
+            continue;
+        }
+
         VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
         size_t pixelBytes = 4;
         if (t.desc.format == TextureFormat::RGBA8_SRGB) fmt = VK_FORMAT_R8G8B8A8_SRGB;
@@ -653,7 +699,8 @@ void Renderer::uploadTextures(Scene& scene) {
                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT, mips);
         m_gpu.uploadToImage(img, t.data.data(),
                             size_t(t.desc.width) * t.desc.height * pixelBytes, mips > 1);
-        m_textures.push_back(std::move(img));
+        m_textures[slot] = std::move(img);
+        m_textureGenerations[slot] = t.generation;
         m_descriptorsDirty = true;
     }
     if (textures.size() > kMaxTextures)
@@ -662,23 +709,41 @@ void Renderer::uploadTextures(Scene& scene) {
 
 // ---------------------------------------------------------------- frames --
 void Renderer::fillGlobals(const Scene& scene, GpuGlobals& g) const {
-    const CameraDesc& c = scene.camera();
-    const vec3 pos(c.position[0], c.position[1], c.position[2]);
-    const vec3 target(c.target[0], c.target[1], c.target[2]);
-    const vec3 upHint(c.up[0], c.up[1], c.up[2]);
+    vec3 pos, forward, upHint;
+    float left, right, bottom, top;
+    bool orthographic = false;
 
-    const vec3 forward = glm::normalize(target - pos);
-    vec3 right = glm::cross(forward, upHint);
-    right = (glm::length(right) < 1e-6f) ? vec3(1, 0, 0) : glm::normalize(right);
-    const vec3 up = glm::cross(right, forward);
+    if (scene.usesCameraEx()) {
+        const CameraDescEx& c = scene.cameraEx();
+        pos = vec3(c.position[0], c.position[1], c.position[2]);
+        forward = glm::normalize(vec3(c.forward[0], c.forward[1], c.forward[2]));
+        upHint = vec3(c.up[0], c.up[1], c.up[2]);
+        left = c.left; right = c.right; bottom = c.bottom; top = c.top;
+        orthographic = (c.projection == CameraProjection::Orthographic);
+    } else {
+        // Legacy look-at + vertical FOV: derive a symmetric dist=1 frustum
+        // slice from the live render-settings aspect ratio (PRD §8 A2).
+        const CameraDesc& c = scene.camera();
+        pos = vec3(c.position[0], c.position[1], c.position[2]);
+        const vec3 target(c.target[0], c.target[1], c.target[2]);
+        forward = glm::normalize(target - pos);
+        upHint = vec3(c.up[0], c.up[1], c.up[2]);
 
-    const float aspect = float(m_settings.width) / float(m_settings.height);
-    const float tanHalf = std::tan(glm::radians(c.fovYDeg) * 0.5f);
+        const float aspect = float(m_settings.width) / float(m_settings.height);
+        const float tanHalf = std::tan(glm::radians(c.fovYDeg) * 0.5f);
+        right = tanHalf * aspect; left = -right;
+        top = tanHalf; bottom = -top;
+    }
+
+    vec3 rightVec = glm::cross(forward, upHint);
+    rightVec = (glm::length(rightVec) < 1e-6f) ? vec3(1, 0, 0) : glm::normalize(rightVec);
+    const vec3 upVec = glm::cross(rightVec, forward);
 
     g.camPos = vec4(pos, 0);
-    g.camRight = vec4(right * tanHalf * aspect, 0);
-    g.camUp = vec4(up * tanHalf, 0);
+    g.camRight = vec4(rightVec, 0);
+    g.camUp = vec4(upVec, 0);
     g.camForward = vec4(forward, 0);
+    g.camFrustum = vec4(left, right, bottom, top);
     g.width = m_settings.width;
     g.height = m_settings.height;
     g.frameIndex = m_frameIndex;
@@ -686,7 +751,8 @@ void Renderer::fillGlobals(const Scene& scene, GpuGlobals& g) const {
     g.lightCount = m_lightCount;
     g.envCdfWidth = m_envCdfW;
     g.envCdfHeight = m_envCdfH;
-    g.flags = (m_hasEnv ? FlagHasEnv : 0) | (m_useDenoised ? FlagUseDenoised : 0);
+    g.flags = (m_hasEnv ? FlagHasEnv : 0) | (m_useDenoised ? FlagUseDenoised : 0) |
+              (orthographic ? FlagOrthographic : 0);
     g.envRotation = scene.envRotation();
     g.envIntensity = scene.envIntensity();
     g.envIntegral = m_envIntegral;
@@ -718,18 +784,39 @@ Result Renderer::renderFrame(Scene& scene, FrameInfo& out) {
         const uint32_t gx = (m_settings.width + 7) / 8;
         const uint32_t gy = (m_settings.height + 7) / 8;
 
-        m_gpu.immediateSubmit([&](VkCommandBuffer cmd) {
-            // Output image content is fully rewritten by resolve: discard.
-            GpuContext::imageBarrier(cmd, m_outputImage.handle(),
-                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0, VK_ACCESS_SHADER_WRITE_BIT);
+        // Split the pathtrace dispatch (the expensive part) into row-strip
+        // tiles, each its own submit+wait, instead of one command buffer
+        // covering the whole frame (PRD §10 R6 / §8 A6): a single huge
+        // dispatch can starve the GPU long enough to trip Rhino's own UI
+        // rendering or the OS's watchdog when sharing the device. Fixed
+        // 4-way split for v1. The tile's row offset goes in via a push
+        // constant added to gl_GlobalInvocationID.y in the shader — plain
+        // vkCmdDispatch every time, base always zero (see the shader comment
+        // for why vkCmdDispatchBase was tried and dropped).
+        constexpr uint32_t kTileCount = 4;
+        const uint32_t rowsPerTile = (gy + kTileCount - 1) / kTileCount;
 
+        for (uint32_t baseRow = 0, tile = 0; baseRow < gy; baseRow += rowsPerTile, ++tile) {
+            const uint32_t rows = std::min(rowsPerTile, gy - baseRow);
+            m_gpu.immediateSubmit([&](VkCommandBuffer cmd) {
+                if (tile == 0) {
+                    // Output image content is fully rewritten by resolve: discard.
+                    GpuContext::imageBarrier(cmd, m_outputImage.handle(),
+                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0, VK_ACCESS_SHADER_WRITE_BIT);
+                }
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                        m_pipeLayout, 0, 1, &m_descSet, 0, nullptr);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pathtracePipe);
+                vkCmdPushConstants(cmd, m_pipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &baseRow);
+                vkCmdDispatch(cmd, gx, rows, 1);
+            });
+        }
+
+        m_gpu.immediateSubmit([&](VkCommandBuffer cmd) {
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                     m_pipeLayout, 0, 1, &m_descSet, 0, nullptr);
-
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pathtracePipe);
-            vkCmdDispatch(cmd, gx, gy, 1);
 
             VkMemoryBarrier barrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
             barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -796,6 +883,12 @@ void Renderer::maybeDenoise() {
     }
 }
 
+// Readback semantics (PRD §8 A7): row-major, top-down (row 0 = top of the
+// image, matching camFrustum's top/bottom mapping in the ray-gen shader —
+// see pathtrace.comp), alpha always 1.0 in v1 (no partial coverage/matte).
+// Both paths reuse a persistent CPU-side buffer across calls; nothing here
+// allocates fresh heap memory per frame, since this runs on every render in
+// a Rhino integration's main loop.
 Result Renderer::readback(ReadbackFormat fmt, void* dst, size_t dstSize) {
     const size_t pixels = size_t(m_settings.width) * m_settings.height;
     if (fmt == ReadbackFormat::RGBA8_SRGB) {
@@ -806,12 +899,12 @@ Result Renderer::readback(ReadbackFormat fmt, void* dst, size_t dstSize) {
     }
     // RGBA32F_LINEAR: average radiance straight from the accumulation buffer.
     if (dstSize < pixels * 16) return Result::ErrorInvalidArgument;
-    std::vector<vec4> accum(pixels);
-    m_gpu.readbackBuffer(m_accumBuf, accum.data(), pixels * 16);
+    if (m_readbackScratch.size() < pixels) m_readbackScratch.resize(pixels);
+    m_gpu.readbackBuffer(m_accumBuf, m_readbackScratch.data(), pixels * 16);
     const float inv = m_frameIndex > 0 ? 1.0f / float(m_frameIndex) : 0.0f;
     vec4* out = static_cast<vec4*>(dst);
     for (size_t i = 0; i < pixels; ++i)
-        out[i] = vec4(vec3(accum[i]) * inv, 1.0f);
+        out[i] = vec4(vec3(m_readbackScratch[i]) * inv, 1.0f);
     return Result::Success;
 }
 

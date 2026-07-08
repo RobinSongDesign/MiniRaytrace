@@ -1,6 +1,12 @@
 #pragma once
 // GLFW window + Vulkan swapchain. Presents the engine's output image by blit.
 
+// mrt_core links volk, not the Vulkan loader import lib (PRD §8 A4); the two
+// cannot coexist in one binary (both define global vk* symbols). Since the
+// viewer links mrt_core, it must route its own Vulkan calls through volk's
+// already-loaded pointers too — include volk.h before GLFW's own vulkan.h
+// (GLFW_INCLUDE_VULKAN) so the latter is a no-op past the header guard.
+#include <volk.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 

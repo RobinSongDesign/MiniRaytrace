@@ -32,21 +32,23 @@ enum Binding : uint32_t {
 
 // Flag bits in GpuGlobals.counts.w
 enum GlobalFlags : uint32_t {
-    FlagHasEnv      = 1u << 0,
-    FlagUseDenoised = 1u << 1,
+    FlagHasEnv        = 1u << 0,
+    FlagUseDenoised   = 1u << 1,
+    FlagOrthographic  = 1u << 2, // camFrustum is absolute half-extents, not a dist=1 slice
 };
 
 struct GpuGlobals {                  // std430 buffer, binding 0
     vec4  camPos;                    // xyz = position
-    vec4  camRight;                  // xyz = right * tan(fovY/2) * aspect
-    vec4  camUp;                     // xyz = up * tan(fovY/2)
+    vec4  camRight;                  // xyz = unit right vector
+    vec4  camUp;                     // xyz = unit up vector
     vec4  camForward;                // xyz = forward (unit)
+    vec4  camFrustum;                // left, right, bottom, top (dist=1 slice, or absolute if ortho)
     uint32_t width, height, frameIndex, maxBounces;
     uint32_t lightCount, envCdfWidth, envCdfHeight, flags;
     float envRotation, envIntensity, envIntegral, exposure;
     float fireflyClamp; uint32_t tonemapMode, tlasRoot, debugView;
 };
-static_assert(sizeof(GpuGlobals) == 4 * 16 + 4 * 16, "GpuGlobals layout drift");
+static_assert(sizeof(GpuGlobals) == 5 * 16 + 4 * 16, "GpuGlobals layout drift");
 
 struct GpuInstance {                 // 144 bytes
     mat4 objectToWorld;

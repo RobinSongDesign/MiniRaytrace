@@ -1,7 +1,17 @@
 build/
+build-msvc/
+build-mac/
 cmake-build-*/
 .cache/
 .DS_Store
 compile_commands.json
 .vscode/
 .idea/
+
+# .NET / Rhino plugin build output
+bin/
+obj/
+rhino/yak/staging/
+
+# Dear ImGui viewer runtime state
+imgui.ini

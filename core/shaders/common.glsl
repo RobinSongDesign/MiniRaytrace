@@ -11,12 +11,14 @@
 
 #define FLAG_HAS_ENV      1u
 #define FLAG_USE_DENOISED 2u
+#define FLAG_ORTHOGRAPHIC 4u
 
 layout(std430, binding = 0) readonly buffer GlobalsBuf {
     vec4  camPos;
-    vec4  camRight;     // right * tan(fovY/2) * aspect
-    vec4  camUp;        // up * tan(fovY/2)
-    vec4  camForward;
+    vec4  camRight;     // unit right vector
+    vec4  camUp;        // unit up vector
+    vec4  camForward;   // unit forward vector
+    vec4  camFrustum;   // left, right, bottom, top (dist=1 slice; absolute if FLAG_ORTHOGRAPHIC)
     uint  width; uint height; uint frameIndex; uint maxBounces;
     uint  lightCount; uint envCdfWidth; uint envCdfHeight; uint flags;
     float envRotation; float envIntensity; float envIntegral; float exposure;

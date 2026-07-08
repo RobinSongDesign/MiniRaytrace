@@ -26,7 +26,8 @@ public:
     Result setSettings(const RenderSettings& settings);
 
     // Consume scene dirty bits: BLAS/TLAS rebuilds, buffer repacks, uploads.
-    Result syncScene(Scene& scene);
+    // outStats (optional) reports what this call actually rebuilt (PRD §8 A1).
+    Result syncScene(Scene& scene, CommitStats* outStats = nullptr);
 
     Result renderFrame(Scene& scene, FrameInfo& out);
     void   resetAccumulation();
@@ -40,7 +41,7 @@ private:
     void createPipelines();
     void createFrameResources();
     void updateDescriptors();
-    void packGeometry(Scene& scene);   // BLAS rebuilds + global buffer repack
+    uint32_t packGeometry(Scene& scene);   // BLAS rebuilds + global buffer repack; returns count rebuilt
     void packInstances(Scene& scene);  // TLAS rebuild + instance buffer
     void packMaterials(Scene& scene);
     void packLights(Scene& scene);
@@ -67,6 +68,10 @@ private:
     Buffer m_globalsBuf, m_accumBuf, m_aovAlbedoBuf, m_aovNormalBuf, m_denoisedBuf;
     Image  m_outputImage;
     Buffer m_readbackBuf;
+    // Persistent scratch for the RGBA32F_LINEAR readback path (PRD §8 A7):
+    // grown, never freshly allocated per call, matching m_readbackBuf's role
+    // for the RGBA8_SRGB path.
+    std::vector<vec4> m_readbackScratch;
 
     // Scene buffers
     Buffer m_nodesBuf, m_trianglesBuf, m_positionsBuf, m_normalsBuf;
@@ -74,7 +79,8 @@ private:
     Buffer m_lightsBuf, m_envCdfBuf;
     Image  m_envImage;
     Image  m_dummyTexture;
-    std::vector<Image> m_textures;        // index == scene texture slot
+    std::vector<Image>    m_textures;       // index == scene texture slot
+    std::vector<uint32_t> m_textureGenerations; // parallel to m_textures; detects add/replace/remove
 
     // CPU-side packing state
     struct BlasEntry {

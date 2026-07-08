@@ -38,7 +38,14 @@ target_include_directories(mrt_core
 find_package(Threads REQUIRED)
 target_link_libraries(mrt_core
     PUBLIC  glm::glm
-    PRIVATE Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator Threads::Threads)
+    # volk, not Vulkan::Vulkan: mrt_core must have zero load-time dependency
+    # on the Vulkan loader (PRD §8 A4). GPUOpen::VulkanMemoryAllocator only
+    # supplies headers here; VMA's own vkGetInstanceProcAddr/DeviceProcAddr
+    # calls are wired through volk's dynamically-loaded pointers (GpuContext.cpp).
+    PRIVATE volk GPUOpen::VulkanMemoryAllocator Threads::Threads)
+target_compile_definitions(mrt_core PRIVATE
+    VMA_STATIC_VULKAN_FUNCTIONS=0
+    VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
 
 if(MRT_ENABLE_OIDN)
     target_link_libraries(mrt_core PRIVATE OpenImageDenoise)

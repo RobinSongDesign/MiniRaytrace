@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Rhino 8 Windows runs .NET 7 plugins (PRD §4.3); no net48 target in v1
+         (design doc §11 Q3) — a mismatched-runtime host is detected and
+         refused at load time instead (see MrtRenderPlugIn). -->
+    <TargetFramework>net7.0</TargetFramework>
+    <!-- Needed so Rhino's plugin loader (its own AssemblyLoadContext) can
+         resolve mrt.dll via runtimes/<rid>/native at run time. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <TargetExt>.rhp</TargetExt>
+    <RootNamespace>MiniRaytrace.Rhino</RootNamespace>
+    <AssemblyName>MiniRaytrace.Rhino</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- CA2255: ModuleInitializer is flagged as "app code only" by default,
+         but a Rhino .rhp *is* the top-level loaded unit here — the intended
+         use case (registers the native library resolver before any P/Invoke). -->
+    <NoWarn>NU1701;CA2255</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pinned to the exact build installed on the dev machine used to bring
+         this plugin up (Rhino 8.22.25217.12451) so compiling and testing use
+         identical RhinoCommon surface; ExcludeAssets=runtime because Rhino
+         itself provides RhinoCommon.dll at load time — we must not ship a copy. -->
+    <PackageReference Include="RhinoCommon" Version="8.22.25217.12451-rc" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <!-- Windows yak layout (design doc §6.4/§8 F1): mrt.dll lands under
+       runtimes/win-x64/native next to the .rhp, matching exactly what
+       NativeMethods.ResolveMrt looks for. Override MrtNativeDll to point at
+       a different native build tree (e.g. CI): `dotnet build
+       -p:MrtNativeDll=path\to\mrt.dll`. Missing file is a warning, not a
+       build error — a plain `dotnet build` here without having built the
+       native side first is a normal dev workflow (NativeMethods.cs's
+       dev-time side-by-side fallback covers that case at run time instead). -->
+  <PropertyGroup>
+    <MrtNativeDll Condition="'$(MrtNativeDll)' == ''">$(MSBuildThisFileDirectory)..\..\build-msvc\capi\mrt.dll</MrtNativeDll>
+  </PropertyGroup>
+
+  <Target Name="CopyMrtNativeDll" AfterTargets="Build">
+    <Warning Text="MrtNativeDll not found at '$(MrtNativeDll)' — build the native mrt target first, or pass -p:MrtNativeDll=&lt;path&gt;. Skipping runtimes/win-x64/native copy."
+             Condition="!Exists('$(MrtNativeDll)')" />
+    <ItemGroup Condition="Exists('$(MrtNativeDll)')">
+      <_MrtNativeFiles Include="$(MrtNativeDll)" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_MrtNativeFiles)" DestinationFolder="$(OutDir)runtimes\win-x64\native\" Condition="Exists('$(MrtNativeDll)')" />
+  </Target>
+
+</Project>

@@ -32,7 +32,8 @@ struct InstanceData {
 struct TextureData {
     TextureDesc          desc;   // pixels pointer invalid after add; data below owns
     std::vector<uint8_t> data;
-    uint32_t             slot = ~0u; // GPU texture array slot, assigned on add
+    uint32_t             slot = ~0u;  // GPU texture array slot, assigned on add
+    uint32_t             generation = 0; // bumped on add/remove; drives Renderer re-upload
 };
 
 enum DirtyBits : uint32_t {
@@ -64,6 +65,7 @@ public:
     void       updateMaterial(MaterialId id, const MaterialDesc& d);
     void       removeMaterial(MaterialId id); // referencing instances fall back to default
     TextureId  addTexture(const TextureDesc& d);
+    void       removeTexture(TextureId id);   // referencing materials fall back to constant (-1)
 
     // -- lights / environment / camera ---------------------------------
     LightId addLight(const LightDesc& d);
@@ -72,7 +74,8 @@ public:
     void    setEnvironment(const TextureDesc& hdri, float rotationRad, float intensity);
     void    setEnvironmentParams(float rotationRad, float intensity); // cheap, no re-upload
     void    clearEnvironment();
-    void    setCamera(const CameraDesc& d);
+    void    setCamera(const CameraDesc& d);       // legacy look-at + fovY
+    void    setCameraEx(const CameraDescEx& d);   // explicit asymmetric frustum / ortho
 
     // -- dirty tracking (consumed by the renderer) ----------------------
     uint32_t dirty() const { return m_dirty; }
@@ -88,6 +91,8 @@ public:
     const std::vector<TextureData>&                     textures()  const { return m_textures; }
     uint32_t   textureSlot(TextureId id) const; // ~0u if invalid
     const CameraDesc& camera() const { return m_camera; }
+    const CameraDescEx& cameraEx() const { return m_cameraEx; }
+    bool usesCameraEx() const { return m_useCameraEx; } // true once setCameraEx() has been called
 
     bool        hasEnvironment() const { return m_envValid; }
     const TextureData& environment() const { return m_env; }
@@ -106,8 +111,11 @@ private:
     std::unordered_map<LightId, LightDesc>       m_lights;
     std::vector<TextureData>                     m_textures;     // slot == index
     std::unordered_map<TextureId, uint32_t>      m_textureSlots; // id -> slot
+    std::vector<uint32_t>                        m_freeTextureSlots; // removed slots, ready for reuse
 
-    CameraDesc  m_camera{};
+    CameraDesc   m_camera{};
+    CameraDescEx m_cameraEx{};
+    bool         m_useCameraEx = false;
     TextureData m_env{};
     bool        m_envValid    = false;
     float       m_envRotation = 0.0f;

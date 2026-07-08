@@ -166,12 +166,41 @@ TextureId Scene::addTexture(const TextureDesc& d) {
     t.desc.pixels = nullptr; // ownership transferred to t.data
     t.data.resize(size_t(d.width) * d.height * pixelBytes);
     std::memcpy(t.data.data(), d.pixels, t.data.size());
-    t.slot = static_cast<uint32_t>(m_textures.size());
+
+    // Reuse a freed slot when available (PRD §8 A3) rather than growing
+    // forever; a removed slot's generation carries over so the Renderer
+    // knows to re-upload it even though the index is unchanged.
+    if (!m_freeTextureSlots.empty()) {
+        const uint32_t slot = m_freeTextureSlots.back();
+        m_freeTextureSlots.pop_back();
+        t.slot = slot;
+        t.generation = m_textures[slot].generation + 1;
+        m_textures[slot] = std::move(t);
+    } else {
+        t.slot = static_cast<uint32_t>(m_textures.size());
+        t.generation = 1;
+        m_textures.push_back(std::move(t));
+    }
 
     m_textureSlots[id] = t.slot;
-    m_textures.push_back(std::move(t));
     markDirty(DirtyTextures);
     return id;
+}
+
+void Scene::removeTexture(TextureId id) {
+    auto it = m_textureSlots.find(id);
+    if (it == m_textureSlots.end()) return;
+    const uint32_t slot = it->second;
+
+    TextureData& t = m_textures[slot];
+    t.desc = TextureDesc{};
+    t.data.clear();
+    t.data.shrink_to_fit();
+    ++t.generation; // slot content changed: Renderer must revert it to the dummy texture
+
+    m_textureSlots.erase(it);
+    m_freeTextureSlots.push_back(slot);
+    markDirty(DirtyTextures);
 }
 
 uint32_t Scene::textureSlot(TextureId id) const {
@@ -225,6 +254,13 @@ void Scene::clearEnvironment() {
 
 void Scene::setCamera(const CameraDesc& d) {
     m_camera = d;
+    m_useCameraEx = false;
+    markDirty(DirtyCamera);
+}
+
+void Scene::setCameraEx(const CameraDescEx& d) {
+    m_cameraEx = d;
+    m_useCameraEx = true;
     markDirty(DirtyCamera);
 }
 

@@ -69,6 +69,23 @@ struct CameraDesc {
     float fovYDeg     = 45.0f;
 };
 
+enum class CameraProjection : uint32_t { Perspective = 0, Orthographic = 1 };
+
+// Extended camera model (PRD §8 A2): explicit asymmetric frustum + parallel
+// projection, matching Rhino's ViewportInfo::GetFrustum(). left/right/bottom/top
+// are a slice of the view frustum at distance 1 along `forward` for
+// perspective, or absolute half-extents for orthographic — either way they
+// map directly to Rhino's frustum values (perspective ones pre-divided by
+// `near`). Two-point perspective is expressed naturally via an asymmetric
+// frustum with a level `forward`; no separate flag needed.
+struct CameraDescEx {
+    CameraProjection projection = CameraProjection::Perspective;
+    float position[3] = { 0, 0, 5 };
+    float forward[3]  = { 0, 0, -1 }; // unit
+    float up[3]       = { 0, 1, 0 };  // up hint, orthonormalized against forward
+    float left = -1.0f, right = 1.0f, bottom = -1.0f, top = 1.0f;
+};
+
 enum class TonemapMode : uint32_t { Linear = 0, Aces = 1 };
 
 // Debug visualisation of the first-hit AOVs (resolve pass).
@@ -91,6 +108,13 @@ struct FrameInfo {
     bool     converged  = false; // sppLimit reached
     bool     denoised   = false; // resolve currently shows denoised image
     float    frameMs    = 0.0f;  // GPU wall time of last frame (CPU measured)
+};
+
+// Stats for a single mrtCommitScene() / Engine::commitScene() call (PRD §8 A1).
+struct CommitStats {
+    uint32_t blasRebuilt = 0;     // number of mesh BLASes rebuilt this commit
+    bool     tlasRebuilt = false; // instance set repacked (TLAS rebuild)
+    float    commitMs    = 0.0f;  // CPU wall time of the whole commit
 };
 
 } // namespace mrt

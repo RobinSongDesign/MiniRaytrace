@@ -14,7 +14,12 @@ add_library(imgui_vk STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(imgui_vk PUBLIC
     ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(imgui_vk PUBLIC glfw Vulkan::Vulkan)
+# volk, not Vulkan::Vulkan: mrt_core (which mrt_viewer links) already brings
+# in volk's global vk* symbols, and those collide with the loader import
+# library's same-named symbols if both are linked into one binary. imgui's
+# Vulkan backend has first-party volk support via this define.
+target_compile_definitions(imgui_vk PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
+target_link_libraries(imgui_vk PUBLIC glfw volk)
 
 add_executable(mrt_viewer
     src/main.cpp
@@ -23,7 +28,7 @@ add_executable(mrt_viewer
     src/Gui.cpp)
 
 target_link_libraries(mrt_viewer
-    PRIVATE mrt_core glfw Vulkan::Vulkan tinyobjloader stb_image imgui_vk)
+    PRIVATE mrt_core glfw volk tinyobjloader stb_image imgui_vk)
 
 # ---- self-contained macOS .app (no Vulkan SDK needed at runtime) ------------
 # Bundles the Vulkan loader + MoltenVK; the loader discovers the ICD via the

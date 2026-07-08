@@ -29,7 +29,13 @@ FetchContent_Declare(tinyobjloader
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG        f0569113c93ad095470c54bf34a17b36646bbbb5)
-FetchContent_MakeAvailable(glm vma tinyobjloader stb)
+# volk: runtime Vulkan loader (PRD §8 A4). mrt_core links this instead of the
+# loader import library, so libmrt has zero load-time Vulkan dependency —
+# see docs/rhino-integration-design.md §6.
+FetchContent_Declare(volk
+    GIT_REPOSITORY https://github.com/zeux/volk.git
+    GIT_TAG        1.3.270)
+FetchContent_MakeAvailable(glm vma tinyobjloader stb volk)
 
 # stb has no CMake build; expose it as an interface target.
 add_library(stb_image INTERFACE)

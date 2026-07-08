@@ -98,6 +98,9 @@ MRT_API mrtResult mrtCreateEngine(const mrtEngineDesc* desc, mrtEngine** outEngi
         mrt::EngineDesc ed;
         ed.enableValidation = desc->enableValidation != 0;
         ed.needPresentSupport = false; // headless: Rhino reads pixels back
+        // 1-based at the C boundary so a zero-initialized struct means "auto"
+        // (see mrtEngineDesc::gpuIndex1); the C++ side is 0-based, -1 = auto.
+        ed.gpuIndex = (desc->gpuIndex1 > 0) ? static_cast<int32_t>(desc->gpuIndex1 - 1) : -1;
         if (desc->width > 0 && desc->height > 0) {
             ed.settings.width = desc->width;
             ed.settings.height = desc->height;
@@ -164,10 +167,18 @@ MRT_API void mrtUpdateMaterial(mrtEngine* e, mrtMaterialId id, const mrtMaterial
     if (eng && validStruct(d)) eng->scene().updateMaterial(id, convert(*d));
 }
 
+MRT_API void mrtRemoveMaterial(mrtEngine* e, mrtMaterialId id) {
+    if (mrt::Engine* eng = unwrap(e)) eng->scene().removeMaterial(id);
+}
+
 MRT_API mrtTextureId mrtAddTexture(mrtEngine* e, const mrtTextureDesc* d) {
     mrt::Engine* eng = unwrap(e);
     if (!eng || !validStruct(d)) return MRT_INVALID_ID;
     return eng->scene().addTexture(convert(*d));
+}
+
+MRT_API void mrtRemoveTexture(mrtEngine* e, mrtTextureId id) {
+    if (mrt::Engine* eng = unwrap(e)) eng->scene().removeTexture(id);
 }
 
 MRT_API mrtLightId mrtAddLight(mrtEngine* e, const mrtLightDesc* d) {
@@ -206,6 +217,35 @@ MRT_API void mrtSetCamera(mrtEngine* e, const mrtCameraDesc* d) {
     std::memcpy(c.up, d->up, sizeof(c.up));
     c.fovYDeg = d->fovYDeg;
     eng->scene().setCamera(c);
+}
+
+MRT_API void mrtSetCameraEx(mrtEngine* e, const mrtCameraDescEx* d) {
+    mrt::Engine* eng = unwrap(e);
+    if (!eng || !validStruct(d)) return;
+    mrt::CameraDescEx c;
+    c.projection = static_cast<mrt::CameraProjection>(d->projection);
+    std::memcpy(c.position, d->position, sizeof(c.position));
+    std::memcpy(c.forward, d->forward, sizeof(c.forward));
+    std::memcpy(c.up, d->up, sizeof(c.up));
+    c.left = d->left; c.right = d->right; c.bottom = d->bottom; c.top = d->top;
+    eng->scene().setCameraEx(c);
+}
+
+MRT_API mrtResult mrtCommitScene(mrtEngine* e, mrtCommitStats* outStats) {
+    mrt::Engine* eng = unwrap(e);
+    if (!eng) return MRT_ERROR_INVALID_HANDLE;
+    try {
+        mrt::CommitStats stats;
+        const mrt::Result r = eng->commitScene(&stats);
+        if (outStats && outStats->structSize >= sizeof(mrtCommitStats)) {
+            outStats->blasRebuilt = stats.blasRebuilt;
+            outStats->tlasRebuilt = stats.tlasRebuilt ? 1 : 0;
+            outStats->commitMs = stats.commitMs;
+        }
+        return toC(r);
+    } catch (...) {
+        return MRT_ERROR_UNKNOWN;
+    }
 }
 
 /* ---- render ----------------------------------------------------------------- */
@@ -267,6 +307,10 @@ MRT_API void mrtSetLogCallback(mrtLogFn fn, void* user) {
 
 MRT_API const char* mrtResultToString(mrtResult r) {
     return mrt::toString(static_cast<mrt::Result>(r));
+}
+
+MRT_API const char* mrtGetLastErrorMessage(void) {
+    return mrt::lastErrorMessage().c_str();
 }
 
 } // extern "C"

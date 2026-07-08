@@ -35,6 +35,12 @@ using LogFn = std::function<void(LogLevel, const std::string&)>;
 void setLogCallback(LogFn fn);
 void log(LogLevel level, const std::string& msg);
 
+// Human-readable detail for the most recent ErrorXxx Result returned to a
+// caller on this thread (PRD §8 A4 — e.g. "no Vulkan loader found"). Empty
+// string if nothing has failed yet. Overwritten by the next failure.
+const std::string& lastErrorMessage();
+void setLastErrorMessage(const std::string& msg);
+
 // Hard limits for v1 (see PRD §10 R3: conservative texture slot count for MoltenVK).
 inline constexpr uint32_t kMaxTextures   = 64;
 inline constexpr uint32_t kMaxBouncesCap = 16;

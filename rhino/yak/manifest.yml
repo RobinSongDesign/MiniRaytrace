@@ -1,0 +1,22 @@
+# Yak package manifest (design doc §6.4/§8 F1). Built from the staging
+# directory produced by build-win.ps1 / build-mac.sh — this file is copied
+# there as-is, version is stamped in by the build script from the same
+# source both platforms read (../MiniRaytrace.Rhino/Properties/AssemblyInfo.cs
+# would be the natural single source, but yak's version field must be
+# semver-ish and independent of the assembly version scheme, so it is tracked
+# here and the build scripts are the one place that must be kept in sync).
+name: mini-raytrace
+version: 0.2.2
+authors:
+  - MiniRaytrace
+description: >
+  A Vulkan compute-shader path tracer embedded as a Rhino renderer: a
+  RenderPlugIn for _Render and a RealtimeDisplayMode for interactive viewport
+  preview. Requires a GPU with Vulkan 1.2 driver support (NVIDIA/AMD/Intel,
+  2016 or newer) on Windows; macOS loads MoltenVK directly and needs no
+  system Vulkan install.
+# url: (fill in the project's public repo/homepage before publishing)
+keywords:
+  - render
+  - raytracing
+  - vulkan

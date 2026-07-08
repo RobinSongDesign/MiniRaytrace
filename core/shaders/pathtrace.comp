@@ -17,6 +17,14 @@
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
+// Row offset for tiled dispatch (PRD §8 A6). vkCmdDispatchBase looked like
+// the natural fit but produced wrong/no output for non-zero bases on tested
+// hardware despite VK_PIPELINE_CREATE_DISPATCH_BASE_BIT being set correctly
+// — apparently not reliable in practice, so tiling is done via an ordinary
+// vkCmdDispatch with this push constant added to the invocation's row
+// instead (verified correct — see docs/rhino-integration-design.md history).
+layout(push_constant) uniform TileOffset { uint baseRow; } pc;
+
 // ---- surface interaction ----------------------------------------------------
 struct Surface {
     vec3 pos;          // world
@@ -90,19 +98,29 @@ float balanceHeuristic(float pdfA, float pdfB) {
 }
 
 void main() {
-    uvec2 pixel = gl_GlobalInvocationID.xy;
+    uvec2 pixel = uvec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y + pc.baseRow);
     if (pixel.x >= g.width || pixel.y >= g.height) return;
     uint pixelIdx = pixel.y * g.width + pixel.x;
 
     Rng rng = rngInit(pixel, g.frameIndex);
 
-    // Pinhole camera ray with in-pixel jitter (AA).
+    // Camera ray with in-pixel jitter (AA). uv in [0,1], y-down (screen space);
+    // camFrustum = (left, right, bottom, top), a dist=1 slice for perspective
+    // or absolute half-extents for orthographic (PRD §8 A2 — matches Rhino's
+    // ViewportInfo::GetFrustum(), including asymmetric/two-point perspective).
     vec2 jitter = rng2(rng);
-    vec2 ndc = (vec2(pixel) + jitter) / vec2(g.width, g.height) * 2.0 - 1.0;
-    ndc.y = -ndc.y;
+    vec2 uv = (vec2(pixel) + jitter) / vec2(g.width, g.height);
+    float px = mix(g.camFrustum.x, g.camFrustum.y, uv.x);
+    float py = mix(g.camFrustum.w, g.camFrustum.z, uv.y); // top..bottom: screen y-down -> world up decreasing
+
     Ray ray;
-    ray.origin = g.camPos.xyz;
-    ray.dir = normalize(g.camForward.xyz + ndc.x * g.camRight.xyz + ndc.y * g.camUp.xyz);
+    if ((g.flags & FLAG_ORTHOGRAPHIC) != 0u) {
+        ray.origin = g.camPos.xyz + px * g.camRight.xyz + py * g.camUp.xyz;
+        ray.dir = g.camForward.xyz;
+    } else {
+        ray.origin = g.camPos.xyz;
+        ray.dir = normalize(g.camForward.xyz + px * g.camRight.xyz + py * g.camUp.xyz);
+    }
     ray.tMax = 1e30;
 
     vec3 L = vec3(0.0);

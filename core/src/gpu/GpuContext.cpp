@@ -24,6 +24,13 @@ void log(LogLevel level, const std::string& msg) {
     fprintf(stderr, "[mrt] %s\n", msg.c_str());
 }
 
+namespace {
+thread_local std::string g_lastError;
+} // namespace
+
+const std::string& lastErrorMessage() { return g_lastError; }
+void setLastErrorMessage(const std::string& msg) { g_lastError = msg; }
+
 const char* toString(Result r) {
     switch (r) {
         case Result::Success:              return "Success";
@@ -142,15 +149,34 @@ bool hasExtension(const std::vector<VkExtensionProperties>& exts, const char* na
 } // namespace
 
 Result GpuContext::init(const GpuContextDesc& desc) {
+    // volk resolves every entry point at runtime (LoadLibrary/dlopen), so
+    // libmrt has zero load-time dependency on a Vulkan loader being present
+    // (PRD §8 A4). This is the single point where a machine with no Vulkan
+    // 1.2+ driver fails, with a message a plugin host can surface verbatim.
+    if (volkInitialize() != VK_SUCCESS) {
+        setLastErrorMessage(
+            "No Vulkan loader found. MiniRaytrace needs a GPU with a Vulkan 1.2+ "
+            "driver (NVIDIA/AMD/Intel, 2016 or newer).");
+        log(LogLevel::Error, lastErrorMessage());
+        return Result::ErrorVulkanInit;
+    }
+
     if (Result r = createInstance(desc); r != Result::Success) return r;
-    if (Result r = pickDeviceAndQueue(desc.needPresentSupport); r != Result::Success) return r;
+    volkLoadInstance(m_instance); // instance-level function pointers now resolved
+    if (Result r = pickDeviceAndQueue(desc.needPresentSupport, desc.gpuIndex); r != Result::Success) return r;
     if (Result r = createDevice(desc.needPresentSupport); r != Result::Success) return r;
+    volkLoadDevice(m_device); // device-specific dispatch: skips the instance-level trampoline
+
+    VmaVulkanFunctions vmaFuncs{};
+    vmaFuncs.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vmaFuncs.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
 
     VmaAllocatorCreateInfo aci{};
     aci.instance = m_instance;
     aci.physicalDevice = m_physical;
     aci.device = m_device;
     aci.vulkanApiVersion = VK_API_VERSION_1_2;
+    aci.pVulkanFunctions = &vmaFuncs;
     MRT_VK_CHECK(vmaCreateAllocator(&aci, &m_allocator));
 
     VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -245,7 +271,8 @@ Result GpuContext::createInstance(const GpuContextDesc& desc) {
     ici.ppEnabledLayerNames = layers.data();
 
     if (vkCreateInstance(&ici, nullptr, &m_instance) != VK_SUCCESS) {
-        log(LogLevel::Error, "vkCreateInstance failed (is the Vulkan SDK / MoltenVK installed?)");
+        setLastErrorMessage("vkCreateInstance failed (is the GPU driver's Vulkan support up to date?)");
+        log(LogLevel::Error, lastErrorMessage());
         return Result::ErrorVulkanInit;
     }
 
@@ -265,36 +292,78 @@ Result GpuContext::createInstance(const GpuContextDesc& desc) {
     return Result::Success;
 }
 
-Result GpuContext::pickDeviceAndQueue(bool /*needPresent*/) {
+namespace {
+// First queue family index offering both graphics and compute, or ~0u.
+// Graphics is required for vkCmdBlitImage (mip generation / present blit).
+uint32_t findGraphicsComputeFamily(VkPhysicalDevice d) {
+    uint32_t qCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(d, &qCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(qCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(d, &qCount, families.data());
+    const VkQueueFlags need = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+    for (uint32_t i = 0; i < qCount; ++i)
+        if ((families[i].queueFlags & need) == need) return i;
+    return ~0u;
+}
+} // namespace
+
+Result GpuContext::pickDeviceAndQueue(bool /*needPresent*/, int32_t gpuIndex) {
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(m_instance, &count, nullptr);
     if (count == 0) {
-        log(LogLevel::Error, "No Vulkan physical devices found");
+        setLastErrorMessage("No Vulkan physical devices found (GPU driver may not expose Vulkan).");
+        log(LogLevel::Error, lastErrorMessage());
         return Result::ErrorVulkanInit;
     }
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(m_instance, &count, devices.data());
 
-    // Prefer discrete > integrated > anything; need a GRAPHICS|COMPUTE family
-    // (graphics is required for vkCmdBlitImage used in mip generation / present blit).
+    // Log the full adapter list once (PRD §8 A4): Rhino support requests
+    // ("wrong GPU picked") are unanswerable without this.
+    static const char* kTypeNames[] = { "Other", "IntegratedGPU", "DiscreteGPU", "VirtualGPU", "CPU" };
+    for (uint32_t i = 0; i < count; ++i) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(devices[i], &props);
+        const char* type = (props.deviceType <= VK_PHYSICAL_DEVICE_TYPE_CPU) ? kTypeNames[props.deviceType] : "Unknown";
+        log(LogLevel::Info, std::string("Vulkan device [") + std::to_string(i) + "]: " +
+                            props.deviceName + " (" + type + ")");
+    }
+
+    // Explicit selection (Rhino's per-session GPU preference, e.g. avoid a
+    // hybrid-graphics laptop's iGPU): honored as-is, no silent fallback —
+    // if it lacks a suitable queue family that's a caller bug worth surfacing.
+    if (gpuIndex >= 0) {
+        if (static_cast<uint32_t>(gpuIndex) >= count) {
+            setLastErrorMessage("Requested GPU index " + std::to_string(gpuIndex) +
+                                " is out of range (" + std::to_string(count) + " device(s) found).");
+            log(LogLevel::Error, lastErrorMessage());
+            return Result::ErrorVulkanInit;
+        }
+        const uint32_t family = findGraphicsComputeFamily(devices[gpuIndex]);
+        if (family == ~0u) {
+            setLastErrorMessage("Requested GPU index " + std::to_string(gpuIndex) +
+                                " has no graphics+compute queue family.");
+            log(LogLevel::Error, lastErrorMessage());
+            return Result::ErrorVulkanInit;
+        }
+        m_physical = devices[gpuIndex];
+        m_queueFamily = family;
+        return Result::Success;
+    }
+
+    // Auto: prefer discrete > integrated > anything else.
     int bestScore = -1;
     for (VkPhysicalDevice d : devices) {
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(d, &props);
-        int score = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)   ? 100
-                  : (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? 50 : 10;
-
-        uint32_t qCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(d, &qCount, nullptr);
-        std::vector<VkQueueFamilyProperties> families(qCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(d, &qCount, families.data());
-        for (uint32_t i = 0; i < qCount; ++i) {
-            const VkQueueFlags need = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
-            if ((families[i].queueFlags & need) == need) {
-                if (score > bestScore) { bestScore = score; m_physical = d; m_queueFamily = i; }
-                break;
-            }
-        }
+        const int score = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)   ? 100
+                        : (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? 50 : 10;
+        const uint32_t family = findGraphicsComputeFamily(d);
+        if (family != ~0u && score > bestScore) { bestScore = score; m_physical = d; m_queueFamily = family; }
+    }
+    if (!m_physical) {
+        setLastErrorMessage("No Vulkan device exposes a graphics+compute queue family.");
+        log(LogLevel::Error, lastErrorMessage());
     }
     return m_physical ? Result::Success : Result::ErrorVulkanInit;
 }
@@ -345,8 +414,11 @@ Result GpuContext::createDevice(bool needPresent) {
     dci.enabledExtensionCount = static_cast<uint32_t>(exts.size());
     dci.ppEnabledExtensionNames = exts.data();
 
-    if (vkCreateDevice(m_physical, &dci, nullptr, &m_device) != VK_SUCCESS)
+    if (vkCreateDevice(m_physical, &dci, nullptr, &m_device) != VK_SUCCESS) {
+        setLastErrorMessage("vkCreateDevice failed.");
+        log(LogLevel::Error, lastErrorMessage());
         return Result::ErrorVulkanInit;
+    }
     vkGetDeviceQueue(m_device, m_queueFamily, 0, &m_queue);
     return Result::Success;
 }
@@ -369,7 +441,12 @@ void GpuContext::immediateSubmit(const std::function<void(VkCommandBuffer)>& rec
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
     MRT_VK_CHECK(vkQueueSubmit(m_queue, 1, &si, m_submitFence));
-    MRT_VK_CHECK(vkWaitForFences(m_device, 1, &m_submitFence, VK_TRUE, UINT64_MAX));
+    // A finite timeout is deliberate: an infinite wait here would hang the
+    // whole host process (Rhino!) uninterruptibly if the GPU/driver ever
+    // wedges. 10s comfortably outlives a normal Windows TDR recovery; on
+    // timeout MRT_VK_CHECK aborts with a clear message instead of hanging.
+    constexpr uint64_t kSubmitTimeoutNs = 10ull * 1000 * 1000 * 1000;
+    MRT_VK_CHECK(vkWaitForFences(m_device, 1, &m_submitFence, VK_TRUE, kSubmitTimeoutNs));
     MRT_VK_CHECK(vkResetFences(m_device, 1, &m_submitFence));
     vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
 }

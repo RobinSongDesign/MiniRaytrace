@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net7.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>MiniRaytrace.Smoke</RootNamespace>
+    <AssemblyName>MiniRaytrace.Smoke</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Same Interop/*.cs as the Rhino plugin, compiled standalone here so
+         this project has zero RhinoCommon dependency (design doc §4.3 —
+         MiniRaytrace.Smoke exists specifically to test P/Invoke without
+         needing Rhino installed/running at all). -->
+    <Compile Include="..\MiniRaytrace.Rhino\Interop\*.cs">
+      <Link>Interop\%(Filename)%(Extension)</Link>
+    </Compile>
+    <!-- RenderSession has no RhinoCommon dependency either (design doc §4.2
+         is deliberately decoupled from ChangeQueue/RhinoDoc), so B3's
+         lifecycle stress test can run here too. -->
+    <Compile Include="..\MiniRaytrace.Rhino\Session\*.cs">
+      <Link>Session\%(Filename)%(Extension)</Link>
+    </Compile>
+  </ItemGroup>
+
+</Project>
