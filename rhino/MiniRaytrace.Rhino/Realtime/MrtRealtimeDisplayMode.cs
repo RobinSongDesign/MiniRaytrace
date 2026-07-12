@@ -36,6 +36,8 @@ public class MrtRealtimeDisplayMode : global::Rhino.Render.RealtimeDisplayMode
     private volatile bool _lastDenoised;
     private volatile bool _isCompleted;
     private volatile bool _isInteractive;
+    private volatile float _lastFrameMs;
+    private DateTime _lastPresentUtc = DateTime.MinValue;
     private int _sppLimit = 1024;
 
     // HUD pause/lock state. CRITICAL: this class OWNS this state - the base
@@ -93,7 +95,9 @@ public class MrtRealtimeDisplayMode : global::Rhino.Render.RealtimeDisplayMode
         _renderWindow = renderWindow;
         _forCapture = forCapture;
         renderWindow.SetSize(new System.Drawing.Size(w, h));
-        _startTime = DateTime.Now;
+        // UTC: Rhino computes the HUD elapsed time against a UTC clock —
+        // local time here made the timer show negative ("00:-58:-20").
+        _startTime = DateTime.UtcNow;
         _isCompleted = false;
         _lastSpp = 0;
         _activeScale = 1;
@@ -150,12 +154,16 @@ public class MrtRealtimeDisplayMode : global::Rhino.Render.RealtimeDisplayMode
         {
             _changeQueue.Flush();
         }
+        // Backfill environment + fallback headlight (a lights-off document
+        // must not render pure black - see MrtChangeQueue.PostFlushFixups).
+        _changeQueue.PostFlushFixups();
     }
 
     private void OnFrameRendered(MrtEngine engine, RenderSessionFrame frame)
     {
         _lastSpp = frame.Spp;
         _lastDenoised = frame.Denoised;
+        _lastFrameMs = frame.FrameMs;
         _isCompleted = frame.Converged;
 
         // Pause/resume is driven by the HUD button events (see ctor); this is
@@ -165,17 +173,29 @@ public class MrtRealtimeDisplayMode : global::Rhino.Render.RealtimeDisplayMode
         if (_hudPaused && _session is { IsPaused: false }) _session.Pause();
         else if (!_hudPaused && _session is { IsPaused: true }) _session.Resume();
 
-        // Present at whatever scale the engine actually rendered THIS frame
-        // at (_activeScale, not yet updated below) before deciding the NEXT
-        // frame's scale - RenderSession applies a pending resize before its
-        // next RenderFrame(), so changing _activeScale here would otherwise
-        // race against ReadFramebuffer's own size expectations this frame.
-        int renderW = Math.Max(1, _width / _activeScale);
-        int renderH = Math.Max(1, _height / _activeScale);
-        if (_renderWindow is not null)
-            FramePresenter.Present(engine, _renderWindow, _width, _height, renderW, renderH);
+        // Present at the resolution the engine ACTUALLY rendered this frame
+        // at (RenderSession.AppliedWidth/Height, maintained on this same
+        // thread) - deriving it from _activeScale raced against resizes
+        // requested from the UI thread and showed stale-memory garbage in
+        // the bottom of the viewport (native readback fills only
+        // engineW*engineH pixels of a larger destination).
+        int renderW = (int)(_session?.AppliedWidth ?? 0);
+        int renderH = (int)(_session?.AppliedHeight ?? 0);
+        if (renderW <= 0 || renderH <= 0) { renderW = _width; renderH = _height; }
 
-        bool interactive = !_forCapture && DateTime.UtcNow - _lastViewChangeUtc < InteractiveWindow;
+        // Presentation throttle (design doc §5.5): early frames land every
+        // time for instant feedback; once the image is converging, readback
+        // + channel writes drop to ~15Hz to stop stealing GPU/CPU time from
+        // actual rendering.
+        DateTime now = DateTime.UtcNow;
+        bool present = frame.Spp < 32 || frame.Converged || (now - _lastPresentUtc).TotalMilliseconds > 66;
+        if (present && _renderWindow is not null)
+        {
+            FramePresenter.Present(engine, _renderWindow, _width, _height, renderW, renderH);
+            _lastPresentUtc = now;
+        }
+
+        bool interactive = !_forCapture && now - _lastViewChangeUtc < InteractiveWindow;
         _isInteractive = interactive;
         int desiredScale = interactive ? 2 : 1;
         if (desiredScale != _activeScale)
@@ -184,7 +204,7 @@ public class MrtRealtimeDisplayMode : global::Rhino.Render.RealtimeDisplayMode
             _session?.Resize((uint)Math.Max(1, _width / desiredScale), (uint)Math.Max(1, _height / desiredScale));
         }
 
-        SignalRedraw();
+        if (present) SignalRedraw();
     }
 
     private void OnFatalError(Exception ex)
@@ -239,6 +259,14 @@ public class MrtRealtimeDisplayMode : global::Rhino.Render.RealtimeDisplayMode
     public override bool HudShowMaxPasses() => true;
     public override bool HudShowPasses() => true;
     public override bool HudShowCustomStatusText() => true;
-    public override string HudCustomStatusText() => _isInteractive ? "interactive" : _lastDenoised ? "denoised" : "rendering";
+    public override string HudCustomStatusText()
+    {
+        // Frame time comes straight from the native engine (GPU render wall
+        // time per frame) - doubles as live proof of which device is doing
+        // the work and how fast.
+        string state = _isInteractive ? "interactive" : _lastDenoised ? "denoised" : "rendering";
+        float ms = _lastFrameMs;
+        return ms > 0f ? $"{state} · {ms:F0} ms/frame" : state;
+    }
     public override DateTime HudStartTime() => _startTime;
 }

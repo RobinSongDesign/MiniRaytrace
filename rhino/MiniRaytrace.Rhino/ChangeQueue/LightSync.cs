@@ -20,14 +20,24 @@ public sealed partial class MrtChangeQueue
     protected override void ApplySunChanges(Light sun) =>
         Guarded(nameof(ApplySunChanges), () =>
         {
+            if (!sun.IsEnabled)
+            {
+                var engine = Engine ?? throw new InvalidOperationException("MrtChangeQueue.Engine not set");
+                if (Handles.Lights.Remove(sun.Id, out uint mrtId)) engine.RemoveLight(mrtId);
+                return;
+            }
+
             var desc = MrtLightDesc.Default;
             desc.Type = MrtLightType.Sun;
 
+            // Rhino's Light.Direction is the direction the light TRAVELS
+            // (sun -> ground, pointing down); the core wants the direction
+            // TOWARD the light (mini_raytrace.h: "sun: towards the light").
             Vector3d dir = sun.Direction;
             dir.Unitize();
-            desc.Direction = ToVec3(dir);
-            desc.Radiance = SunRadiance(sun);
+            desc.Direction = ToVec3(-dir);
             // Physical sun disc, matches MrtLightDesc.Default's angularRadius.
+            desc.Radiance = SunConeRadiance(sun.Diffuse, sun.Intensity, desc.AngularRadius);
 
             UpsertLight(sun.Id, desc);
         });
@@ -102,13 +112,14 @@ public sealed partial class MrtChangeQueue
         {
             // A non-physical "directional light" object, distinct from the
             // document Sun (which comes through ApplySunChanges instead) -
-            // approximate as a tight-beam sun.
+            // approximate as a tight-beam sun. Direction negated: Rhino gives
+            // the travel direction, the core wants "towards the light".
             desc.Type = MrtLightType.Sun;
             Vector3d dir = data.Direction;
             dir.Unitize();
-            desc.Direction = ToVec3(dir);
+            desc.Direction = ToVec3(-dir);
             desc.AngularRadius = 0.0005f;
-            desc.Radiance = SunRadiance(data);
+            desc.Radiance = SunConeRadiance(data.Diffuse, data.Intensity, desc.AngularRadius);
         }
 
         return desc;
@@ -129,7 +140,21 @@ public sealed partial class MrtChangeQueue
     private static MrtVec3 PointRadiance(Light data) =>
         ScaleColor(data.Diffuse, data.PowerWatts * data.Intensity / (4.0 * Math.PI));
 
-    private static MrtVec3 SunRadiance(Light data) => ScaleColor(data.Diffuse, data.Intensity);
+    /// <summary>
+    /// Converts a target on-axis irradiance into the cone radiance the shader
+    /// integrates: contribution ≈ L·Ω, Ω = 2π(1-cos r), so L = E/Ω. Feeding
+    /// Rhino's Intensity (≈1) in directly as L makes the sun ~4 orders of
+    /// magnitude too dim (Ω of the physical sun disc is ~6.8e-5 sr) - that
+    /// was a major part of the all-black first render. E = 4·Intensity is an
+    /// eyeballed starting calibration; refine against Raytraced side by side
+    /// (design doc D5 acceptance).
+    /// </summary>
+    internal static MrtVec3 SunConeRadiance(System.Drawing.Color diffuse, double intensity, float angularRadius)
+    {
+        double omega = 2.0 * Math.PI * (1.0 - Math.Cos(angularRadius));
+        double e = 4.0 * intensity;
+        return ScaleColor(diffuse, e / Math.Max(omega, 1e-9));
+    }
 
     private static MrtVec3 ScaleColor(System.Drawing.Color c, double scale) => new(
         (float)(c.R / 255.0 * scale),

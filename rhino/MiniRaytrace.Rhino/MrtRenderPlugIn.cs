@@ -3,6 +3,7 @@ using Rhino.Commands;
 using Rhino.FileIO;
 using Rhino.PlugIns;
 using Rhino.Render;
+using MiniRaytrace.Rhino.Interop;
 using MiniRaytrace.Rhino.Presentation;
 using MiniRaytrace.Rhino.Settings;
 
@@ -27,8 +28,26 @@ public class MrtRenderPlugIn : RenderPlugIn
 
     private const string SettingsChunkName = "MiniRaytraceRenderSettings";
 
+    // Rooted for the lifetime of the plug-in: the native side keeps calling
+    // this function pointer, so the delegate must never be collected.
+    private static readonly MrtLogFn NativeLog = (level, message, _) =>
+    {
+        try
+        {
+            // level: 0=debug 1=info 2=warn 3=error. Info and up go to the
+            // command line - that's where "which GPU did the engine pick"
+            // and any Vulkan failures become visible to the user.
+            if (level >= 1) RhinoApp.WriteLine($"MiniRaytrace: {message}");
+        }
+        catch
+        {
+            // Never let a logging failure travel back into native code.
+        }
+    };
+
     protected override LoadReturnCode OnLoad(ref string errorMessage)
     {
+        NativeMethods.mrtSetLogCallback(NativeLog, IntPtr.Zero);
         RhinoDoc.CloseDocument += (_, e) => MrtRenderSettingsData.Forget(e.Document);
         return LoadReturnCode.Success;
     }

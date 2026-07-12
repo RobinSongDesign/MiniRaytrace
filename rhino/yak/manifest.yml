@@ -6,7 +6,7 @@
 # semver-ish and independent of the assembly version scheme, so it is tracked
 # here and the build scripts are the one place that must be kept in sync).
 name: mini-raytrace
-version: 0.2.2
+version: 0.2.4
 authors:
   - MiniRaytrace
 description: >

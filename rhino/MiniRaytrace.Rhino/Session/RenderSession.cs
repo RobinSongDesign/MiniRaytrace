@@ -48,6 +48,20 @@ public sealed class RenderSession : IDisposable
     public bool IsRunning => _thread is { IsAlive: true };
     public bool IsPaused => _paused;
 
+    /// <summary>
+    /// The resolution the engine is ACTUALLY rendering at - written on the
+    /// render thread each time settings are applied, i.e. always in sync
+    /// with the frames delivered to onFrameRendered (which runs on the same
+    /// thread). Presentation must size its readback from THIS, never from
+    /// its own bookkeeping: a resize requested from another thread lands at
+    /// some later loop iteration, and native mrtReadFramebuffer happily
+    /// fills only engineW*engineH pixels of a larger buffer - the remainder
+    /// is stale garbage on screen (observed live as a band of noise at the
+    /// bottom of the viewport).
+    /// </summary>
+    public uint AppliedWidth { get; private set; }
+    public uint AppliedHeight { get; private set; }
+
     public RenderSession(uint width, uint height, Action<MrtEngine> syncScene,
         Action<MrtEngine, RenderSessionFrame>? onFrameRendered = null,
         Action<Exception>? onFatalError = null,
@@ -158,6 +172,8 @@ public sealed class RenderSession : IDisposable
             MrtRenderSettings initial;
             lock (_controlLock) { initial = _lastRequestedSettings; _settingsPending = false; }
             engine.SetRenderSettings(initial);
+            AppliedWidth = initial.Width;
+            AppliedHeight = initial.Height;
         }
         catch (Exception ex)
         {
@@ -180,6 +196,8 @@ public sealed class RenderSession : IDisposable
                     MrtRenderSettings settings;
                     lock (_controlLock) { settings = _lastRequestedSettings; _settingsPending = false; }
                     engine.SetRenderSettings(settings);
+                    AppliedWidth = settings.Width;
+                    AppliedHeight = settings.Height;
                 }
 
                 _syncScene(engine);

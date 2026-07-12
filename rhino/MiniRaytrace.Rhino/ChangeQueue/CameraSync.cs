@@ -50,6 +50,7 @@ public sealed partial class MrtChangeQueue
         desc.Top = (float)(top * scale);
 
         engine.SetCameraEx(desc);
+        NoteCameraForward(desc.Forward);
         RaiseViewChanged();
     }
 }

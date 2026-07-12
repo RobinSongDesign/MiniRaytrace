@@ -24,5 +24,5 @@ using Rhino.PlugIns;
 // Keep the first three components in sync with rhino/yak/manifest.yml's
 // `version:` field — `yak build` warns (not errors) on a mismatch, verified
 // against a real local Yak.exe (design doc F1).
-[assembly: AssemblyVersion("0.2.2.0")]
-[assembly: AssemblyFileVersion("0.2.2.0")]
+[assembly: AssemblyVersion("0.2.4.0")]
+[assembly: AssemblyFileVersion("0.2.4.0")]

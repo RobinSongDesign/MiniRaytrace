@@ -59,6 +59,67 @@ public sealed partial class MrtChangeQueue : RCQ.ChangeQueue
 
     internal void RaiseViewChanged() => ViewChanged?.Invoke();
 
+    // ---- fallback headlight (D5/D6 gap found in the first render test) ----
+    // Rhino's own renderers synthesize a "default light" when the document
+    // has no lights; without one, a lights-off + skylight-off document is
+    // pure black. Mirror that: a broad, soft camera headlight that exists
+    // only while there are no real lights AND the environment contributes no
+    // light, following the camera as it moves.
+    private uint _fallbackLightId;
+    private MrtVec3 _lastCameraForward = new(0, 0, -1);
+    private const float FallbackConeRadius = 0.25f; // ~14°: soft, no razor shadows
+
+    /// <summary>
+    /// Runs on the render thread right after every CreateWorld()/Flush()
+    /// (called by the display mode / render pipeline, not by native code):
+    /// backfills an environment if no skylight/environment event ever
+    /// arrived, then reconciles the fallback headlight.
+    /// </summary>
+    public void PostFlushFixups() =>
+        Guarded(nameof(PostFlushFixups), () =>
+        {
+            if (Engine is null) return;
+            EnsureEnvironmentInitialized();
+            UpdateFallbackLight();
+        });
+
+    internal void NoteCameraForward(MrtVec3 forward)
+    {
+        _lastCameraForward = forward;
+        // Keep the headlight glued to the view while it exists.
+        if (_fallbackLightId != 0 && Engine is { } engine)
+            engine.UpdateLight(_fallbackLightId, BuildFallbackLightDesc());
+    }
+
+    private void UpdateFallbackLight()
+    {
+        var engine = Engine!;
+        bool needed = Handles.Lights.Count == 0 && !EnvironmentLit;
+        if (needed && _fallbackLightId == 0)
+        {
+            _fallbackLightId = engine.AddLight(BuildFallbackLightDesc());
+            ChangeQueueLog.Diag("fallback headlight on (no lights, environment unlit)");
+        }
+        else if (!needed && _fallbackLightId != 0)
+        {
+            engine.RemoveLight(_fallbackLightId);
+            _fallbackLightId = 0;
+            ChangeQueueLog.Diag("fallback headlight off");
+        }
+    }
+
+    private MrtLightDesc BuildFallbackLightDesc()
+    {
+        var desc = MrtLightDesc.Default;
+        desc.Type = MrtLightType.Sun;
+        // Headlight: travels along the view direction, so "towards the
+        // light" is the negated camera forward.
+        desc.Direction = new MrtVec3(-_lastCameraForward.X, -_lastCameraForward.Y, -_lastCameraForward.Z);
+        desc.AngularRadius = FallbackConeRadius;
+        desc.Radiance = SunConeRadiance(System.Drawing.Color.White, 1.0, FallbackConeRadius);
+        return desc;
+    }
+
     /// <summary>
     /// Every Apply* override must route its body through this: these
     /// callbacks are invoked FROM NATIVE RDK CODE, and an exception escaping

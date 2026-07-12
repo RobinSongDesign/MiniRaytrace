@@ -28,9 +28,11 @@ public static class FramePresenter
 {
     // Reused across calls so steady-state rendering doesn't allocate per
     // frame (mirrors the native side's own persistent-scratch-buffer rule,
-    // PRD §8 A7).
-    private static float[] _linearScratch = Array.Empty<float>();
-    private static Color4f[] _colorScratch = Array.Empty<Color4f>();
+    // PRD §8 A7). ThreadStatic: each RenderSession presents from its own
+    // render thread, and a realtime viewport + a modal _Render can run
+    // concurrently - shared statics would tear each other's frames.
+    [ThreadStatic] private static float[]? _linearScratch;
+    [ThreadStatic] private static Color4f[]? _colorScratch;
 
     public static void Present(MrtEngine engine, RenderWindow renderWindow, int width, int height) =>
         Present(engine, renderWindow, width, height, width, height);
@@ -47,22 +49,24 @@ public static class FramePresenter
         int displayWidth, int displayHeight, int renderWidth, int renderHeight)
     {
         int renderCount = renderWidth * renderHeight;
-        if (_linearScratch.Length < renderCount * 4)
-            _linearScratch = new float[renderCount * 4];
+        float[] linear = _linearScratch ??= new float[renderCount * 4];
+        if (linear.Length < renderCount * 4)
+            linear = _linearScratch = new float[renderCount * 4];
 
-        Span<byte> asBytes = MemoryMarshal.AsBytes(_linearScratch.AsSpan(0, renderCount * 4));
+        Span<byte> asBytes = MemoryMarshal.AsBytes(linear.AsSpan(0, renderCount * 4));
         engine.ReadFramebuffer(MrtPixelFormat.Rgba32fLinear, asBytes);
 
         int displayCount = displayWidth * displayHeight;
-        if (_colorScratch.Length < displayCount)
-            _colorScratch = new Color4f[displayCount];
+        Color4f[] colors = _colorScratch ??= new Color4f[displayCount];
+        if (colors.Length < displayCount)
+            colors = _colorScratch = new Color4f[displayCount];
 
         if (renderWidth == displayWidth && renderHeight == displayHeight)
         {
             for (int i = 0; i < displayCount; i++)
             {
                 int b = i * 4;
-                _colorScratch[i] = new Color4f(_linearScratch[b], _linearScratch[b + 1], _linearScratch[b + 2], _linearScratch[b + 3]);
+                colors[i] = new Color4f(linear[b], linear[b + 1], linear[b + 2], linear[b + 3]);
             }
         }
         else
@@ -74,13 +78,13 @@ public static class FramePresenter
                 {
                     int sx = Math.Min(renderWidth - 1, x * renderWidth / displayWidth);
                     int b = (sy * renderWidth + sx) * 4;
-                    _colorScratch[y * displayWidth + x] =
-                        new Color4f(_linearScratch[b], _linearScratch[b + 1], _linearScratch[b + 2], _linearScratch[b + 3]);
+                    colors[y * displayWidth + x] =
+                        new Color4f(linear[b], linear[b + 1], linear[b + 2], linear[b + 3]);
                 }
             }
         }
 
         renderWindow.SetRGBAChannelColors(new Size(displayWidth, displayHeight),
-            displayCount == _colorScratch.Length ? _colorScratch : _colorScratch[..displayCount]);
+            displayCount == colors.Length ? colors : colors[..displayCount]);
     }
 }

@@ -24,6 +24,23 @@ namespace MiniRaytrace.Rhino.ChangeQueue;
 public sealed partial class MrtChangeQueue
 {
     private bool _skylightEnabled = true;
+    private bool _envEverApplied;
+
+    /// <summary>True when the current environment actually contributes light
+    /// (nonzero intensity, non-black content) - drives the fallback headlight
+    /// decision in PostFlushFixups.</summary>
+    internal bool EnvironmentLit { get; private set; }
+
+    /// <summary>
+    /// Called by PostFlushFixups when no skylight/environment event arrived
+    /// during CreateWorld - without it the engine has no environment at all
+    /// and every miss ray returns pure black (the "switched mode, everything
+    /// black" failure from the first render test).
+    /// </summary>
+    internal void EnsureEnvironmentInitialized()
+    {
+        if (!_envEverApplied) RefreshEnvironment();
+    }
 
     protected override void ApplySkylightChanges(RCQ.Skylight skylight) =>
         Guarded(nameof(ApplySkylightChanges), () =>
@@ -38,30 +55,45 @@ public sealed partial class MrtChangeQueue
     private void RefreshEnvironment()
     {
         var engine = Engine ?? throw new InvalidOperationException("MrtChangeQueue.Engine not set");
+        _envEverApplied = true;
         float intensity = _skylightEnabled ? 1.0f : 0.0f;
 
-        uint crc = EnvironmentIdForUsage(RenderEnvironment.Usage.Background);
+        // The environment that drives skylighting takes priority (that's the
+        // one lighting the scene - in default docs the "Studio" skylight env
+        // lives under this usage, NOT under Background); fall back to the
+        // background environment, then to the plain background color.
+        uint crc = _skylightEnabled ? EnvironmentIdForUsage(RenderEnvironment.Usage.Skylighting) : 0;
+        if (crc == 0) crc = EnvironmentIdForUsage(RenderEnvironment.Usage.Background);
         RenderEnvironment? env = crc != 0 ? EnvironmentForid(crc) : null;
-        if (env is null)
+
+        if (env is not null)
         {
-            engine.ClearEnvironment();
+            SimulatedEnvironment sim = env.SimulateEnvironment(isForDataOnly: true);
+            SimulatedTexture? bg = sim.BackgroundImage;
+
+            if (bg is not null && !string.IsNullOrEmpty(bg.Filename) && File.Exists(bg.Filename))
+            {
+                BakeEquirectFromFile(bg.Filename, (float)bg.Rotation, intensity, engine);
+                EnvironmentLit = intensity > 0f;
+                return;
+            }
+
+            if (bg is not null)
+                ChangeQueueLog.WarnOnce("env-procedural",
+                    "procedural/physical-sky environments aren't baked in v1, using an average color instead");
+
+            SetSolidEnvironment(sim.BackgroundColor, 0f, intensity, engine);
+            EnvironmentLit = intensity > 0f && (sim.BackgroundColor.R + sim.BackgroundColor.G + sim.BackgroundColor.B) > 0;
             return;
         }
 
-        SimulatedEnvironment sim = env.SimulateEnvironment(isForDataOnly: true);
-        SimulatedTexture? bg = sim.BackgroundImage;
-
-        if (bg is not null && !string.IsNullOrEmpty(bg.Filename) && File.Exists(bg.Filename))
-        {
-            BakeEquirectFromFile(bg.Filename, (float)bg.Rotation, intensity, engine);
-            return;
-        }
-
-        if (bg is not null)
-            ChangeQueueLog.WarnOnce("env-procedural",
-                "procedural/physical-sky environments aren't baked in v1, using an average color instead");
-
-        SetSolidEnvironment(sim.BackgroundColor, 0f, intensity, engine);
+        // No environment assigned at all (default docs use a plain background
+        // color, which is not an environment object). Upload that color as a
+        // 1x1 env anyway: it keeps the background from rendering void-black
+        // and, with skylight on, doubles as the ambient dome.
+        Color bgColor = GetQueueRenderSettings().BackgroundColorTop;
+        SetSolidEnvironment(bgColor, 0f, intensity, engine);
+        EnvironmentLit = intensity > 0f && (bgColor.R + bgColor.G + bgColor.B) > 0;
     }
 
     private const int EnvBakeWidth = 1024, EnvBakeHeight = 512; // design doc §5.2 procedural-bake size, reused here

@@ -91,6 +91,7 @@ public sealed class MrtRenderPipeline : RenderPipeline
         // wants (one full load, no incremental tracking, design doc §7).
         _changeQueue.Engine = engine;
         _changeQueue.CreateWorld();
+        _changeQueue.PostFlushFixups();
     }
 
     private void OnFrameRendered(MrtEngine engine, RenderSessionFrame frame)
